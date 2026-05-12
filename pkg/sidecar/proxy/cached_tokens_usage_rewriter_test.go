@@ -114,7 +114,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should buffer streamed usage chunks split before the data prefix", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer := newCachedTokensResponseWriter(recorder, 7, true)
+		writer := newCachedTokensResponseWriter(recorder, 7)
 
 		n, err := writer.Write([]byte("da"))
 		Expect(err).ToNot(HaveOccurred())
@@ -132,7 +132,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should buffer streamed usage chunks split inside the JSON payload", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer := newCachedTokensResponseWriter(recorder, 7, true)
+		writer := newCachedTokensResponseWriter(recorder, 7)
 
 		firstChunk := []byte(`data: {"choices":[],"usage":{"prompt_tokens":64,`)
 		n, err := writer.Write(firstChunk)
@@ -162,7 +162,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should preserve ReaderFrom while rewriting cached tokens", func() {
 		base := &readerFromResponseWriter{header: http.Header{}}
-		writer := newCachedTokensResponseWriter(base, 7, true)
+		writer := newCachedTokensResponseWriter(base, 7)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -175,7 +175,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should preserve ReaderFrom for streamed responses while rewriting complete lines", func() {
 		base := &readerFromResponseWriter{header: http.Header{"Content-Type": []string{"text/event-stream"}}}
-		writer := newCachedTokensResponseWriter(base, 7, true)
+		writer := newCachedTokensResponseWriter(base, 7)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -189,7 +189,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should flush a trailing streamed data line without a final newline", func() {
 		base := &readerFromResponseWriter{header: http.Header{"Content-Type": []string{"text/event-stream"}}}
-		writer := newCachedTokensResponseWriter(base, 7, true)
+		writer := newCachedTokensResponseWriter(base, 7)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 

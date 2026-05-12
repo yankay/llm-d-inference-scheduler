@@ -39,11 +39,7 @@ type cachedTokensUsageRewriter struct {
 // See: https://platform.openai.com/docs/guides/prompt-caching
 const promptTokensDetailsField = "prompt_tokens_details"
 
-func newCachedTokensResponseWriter(w http.ResponseWriter, cachedTokens int, enabled bool) http.ResponseWriter {
-	if !enabled {
-		// Prefill did not report cached_tokens, so keep the decoder response intact.
-		return w
-	}
+func newCachedTokensResponseWriter(w http.ResponseWriter, cachedTokens int) http.ResponseWriter {
 	rewriter := &cachedTokensUsageRewriter{
 		header:       w.Header(),
 		cachedTokens: cachedTokens,
