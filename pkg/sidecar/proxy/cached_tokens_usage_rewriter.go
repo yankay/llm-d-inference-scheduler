@@ -40,13 +40,18 @@ type cachedTokensUsageRewriter struct {
 const promptTokensDetailsField = "prompt_tokens_details"
 
 func newCachedTokensResponseWriter(w http.ResponseWriter, cachedTokens int) http.ResponseWriter {
+	writer, _ := newCachedTokensResponseWriterWithFinalize(w, cachedTokens)
+	return writer
+}
+
+func newCachedTokensResponseWriterWithFinalize(w http.ResponseWriter, cachedTokens int) (http.ResponseWriter, func() error) {
 	rewriter := &cachedTokensUsageRewriter{
 		header:       w.Header(),
 		cachedTokens: cachedTokens,
 	}
 	// httpsnoop preserves optional ResponseWriter interfaces such as
 	// http.Flusher, http.Hijacker, http.Pusher, and io.ReaderFrom.
-	return httpsnoop.Wrap(w, httpsnoop.Hooks{
+	writer := httpsnoop.Wrap(w, httpsnoop.Hooks{
 		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
 			return func(statusCode int) {
 				rewriter.writeHeader(next, statusCode)
@@ -64,6 +69,9 @@ func newCachedTokensResponseWriter(w http.ResponseWriter, cachedTokens int) http
 			}
 		},
 	})
+	return writer, func() error {
+		return rewriter.flushSSEBuffer(w.Write)
+	}
 }
 
 func (r *cachedTokensUsageRewriter) writeHeader(next httpsnoop.WriteHeaderFunc, statusCode int) {
@@ -80,7 +88,12 @@ func (r *cachedTokensUsageRewriter) write(next httpsnoop.WriteFunc, body []byte)
 	}
 	n, err := next(updated)
 	if err != nil {
-		return n, err
+		// io.Writer promises 0 <= n <= len(body) for the input slice p (= body).
+		// next(updated) reports bytes written from updated, not from body.
+		return 0, err
+	}
+	if n != len(updated) {
+		return 0, io.ErrShortWrite
 	}
 	return len(body), nil
 }

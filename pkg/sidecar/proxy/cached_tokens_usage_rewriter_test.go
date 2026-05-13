@@ -199,4 +199,19 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(n).To(Equal(int64(len(body))))
 		Expect(base.body.String()).To(ContainSubstring(`"cached_tokens":7`))
 	})
+
+	It("should finalize a trailing streamed data line written without a final newline", func() {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "text/event-stream")
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7)
+
+		body := []byte(`data: {"choices":[],"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`)
+		n, err := writer.Write(body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(body)))
+		Expect(recorder.Body.String()).To(BeEmpty())
+
+		Expect(finalize()).To(Succeed())
+		Expect(recorder.Body.String()).To(ContainSubstring(`"cached_tokens":7`))
+	})
 })

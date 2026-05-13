@@ -250,7 +250,7 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	// 2. Forward to local decoder.
 
 	s.logger.V(5).Info("sending request to decoder", "body", string(dbody))
-	decodeWriter := newCachedTokensResponseWriter(w, pCachedTokens)
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
@@ -258,6 +258,11 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
 		s.decoderProxy.ServeHTTP(decodeWriter, dreq)
+	}
+	if err := finalizeDecodeWriter(); err != nil {
+		s.logger.Error(err, "failed to flush cached token response writer")
+		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
+		return
 	}
 
 	decodeDuration := time.Since(decodeStart)
