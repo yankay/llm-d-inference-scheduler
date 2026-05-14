@@ -1,0 +1,79 @@
+=== HTTP Benchmark ===
+url=http://localhost:46625/v1/completions host=bench.local concurrency=1200 total=1500 input-chars=220000 body-bytes=220069 stream=true
+
+  progress: 50/1500
+  progress: 100/1500
+  progress: 150/1500
+  progress: 200/1500
+  progress: 250/1500
+  progress: 300/1500
+  progress: 350/1500
+  progress: 400/1500
+  progress: 450/1500
+  progress: 500/1500
+  progress: 550/1500
+  progress: 600/1500
+  progress: 650/1500
+  progress: 700/1500
+  progress: 750/1500
+  progress: 800/1500
+  progress: 850/1500
+  progress: 900/1500
+  progress: 950/1500
+  progress: 1000/1500
+  progress: 1050/1500
+  progress: 1100/1500
+  progress: 1150/1500
+  progress: 1200/1500
+  progress: 1250/1500
+  progress: 1300/1500
+  progress: 1350/1500
+  progress: 1400/1500
+  progress: 1450/1500
+  progress: 1500/1500
+
+=== Results ===
+Successful: 1499
+Errors:     1
+Error samples:
+  [1] status 503: upstream connect error or disconnect/reset before headers. reset reason: connection termination
+Duration:   9.81s
+Throughput: 152.78 req/s
+
+--- TTFT / first response byte ---
+Mean:  4327.51ms
+P50:   4186.33ms
+P90:   8251.56ms
+P95:   8820.81ms
+P99:   9425.71ms
+Min:   55.35ms
+Max:   9643.21ms
+
+--- Total request latency ---
+Mean:  4327.90ms
+P50:   4186.35ms
+P90:   8251.58ms
+P95:   8820.84ms
+P99:   9425.72ms
+Min:   55.35ms
+Max:   9643.89ms
+
+--- Key EPP Metrics ---
+inference_extension_plugin_duration_seconds_sum{extension_point="Picker",plugin_name="max-score-picker",plugin_type="max-score-picker"} 0.03222021399999995
+inference_extension_plugin_duration_seconds_count{extension_point="Picker",plugin_name="max-score-picker",plugin_type="max-score-picker"} 11542
+inference_extension_plugin_duration_seconds_sum{extension_point="PreRequest",plugin_name="approx-prefix-cache-producer",plugin_type="approx-prefix-cache-producer"} 0.09618887299999998
+inference_extension_plugin_duration_seconds_count{extension_point="PreRequest",plugin_name="approx-prefix-cache-producer",plugin_type="approx-prefix-cache-producer"} 11542
+inference_extension_plugin_duration_seconds_sum{extension_point="ProcessProfilesResults",plugin_name="single-profile-handler",plugin_type="single-profile-handler"} 0.004497376000000063
+inference_extension_plugin_duration_seconds_count{extension_point="ProcessProfilesResults",plugin_name="single-profile-handler",plugin_type="single-profile-handler"} 11542
+inference_extension_plugin_duration_seconds_sum{extension_point="ProfilePicker",plugin_name="single-profile-handler",plugin_type="single-profile-handler"} 0.00935443099999884
+inference_extension_plugin_duration_seconds_count{extension_point="ProfilePicker",plugin_name="single-profile-handler",plugin_type="single-profile-handler"} 23084
+inference_extension_plugin_duration_seconds_sum{extension_point="Scorer",plugin_name="kv-cache-utilization-scorer",plugin_type="kv-cache-utilization-scorer"} 0.009700115999999988
+inference_extension_plugin_duration_seconds_count{extension_point="Scorer",plugin_name="kv-cache-utilization-scorer",plugin_type="kv-cache-utilization-scorer"} 11542
+inference_extension_plugin_duration_seconds_sum{extension_point="Scorer",plugin_name="prefix-cache-scorer",plugin_type="prefix-cache-scorer"} 0.02396089499999996
+inference_extension_plugin_duration_seconds_count{extension_point="Scorer",plugin_name="prefix-cache-scorer",plugin_type="prefix-cache-scorer"} 11542
+inference_extension_plugin_duration_seconds_sum{extension_point="Scorer",plugin_name="queue-scorer",plugin_type="queue-scorer"} 0.012296229000000023
+inference_extension_plugin_duration_seconds_count{extension_point="Scorer",plugin_name="queue-scorer",plugin_type="queue-scorer"} 11542
+inference_extension_scheduler_e2e_duration_seconds_sum 0.37355155000000045
+inference_extension_scheduler_e2e_duration_seconds_count 11542
+inference_objective_request_duration_seconds_sum{model_name="Qwen/Qwen3-32B",target_model_name="Qwen/Qwen3-32B"} 20559.045509512016
+inference_objective_request_duration_seconds_count{model_name="Qwen/Qwen3-32B",target_model_name="Qwen/Qwen3-32B"} 11541

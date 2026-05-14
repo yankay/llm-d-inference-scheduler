@@ -1,0 +1,11 @@
+stable-1s summary
+  concurrency=1200
+  input_chars=220000
+  warmup_reqs=300
+  round_reqs=1500
+  rounds=3
+  threshold_ms=1100
+  gateway_local_port=46625
+  metrics_local_port=41584
+  per_round_ttft_mean_ms: 4701.59 4327.51 4555.61
+  median_ttft_mean_ms: 4555.61
