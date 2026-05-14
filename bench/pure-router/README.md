@@ -122,6 +122,89 @@ TTFT be assigned to EPP request-path behavior. See [`TIMING-DEBUG.md`](TIMING-DE
 for the temporary EPP-side timing instrumentation and the initial observation
 that body streaming wait dominates this particular 220 KB prompt benchmark.
 
+### Gateway / Envoy stats workflow
+
+EPP scheduler and plugin metrics are not enough to explain this benchmark by
+themselves. They cover the scheduler/plugin hooks after EPP has the parsed
+request, but they do not include Envoy sending the request body to ext_proc,
+body chunk streaming, gRPC stream queuing, or Gateway-to-backend time. Pair EPP
+metrics with Gateway Envoy admin stats when investigating TTFT.
+
+Port-forward the Gateway Envoy admin port and the EPP metrics port:
+
+```bash
+kubectl port-forward --address localhost \
+  pod/$(kubectl get pod -l gateway.networking.k8s.io/gateway-name=inference-gateway -o jsonpath='{.items[0].metadata.name}') \
+  15000:15000
+
+kubectl port-forward --address localhost svc/vllm-qwen3-32b-epp 19090:9090
+```
+
+Take before/after snapshots around one benchmark run:
+
+```bash
+OUT=/tmp/router-bench-stats-$(date +%s)
+mkdir -p "${OUT}"
+
+curl -sf http://127.0.0.1:15000/stats/prometheus > "${OUT}/envoy-prom-before.txt"
+curl -sf http://127.0.0.1:15000/clusters         > "${OUT}/envoy-clusters-before.txt"
+curl -sf http://127.0.0.1:19090/metrics          > "${OUT}/epp-before.txt"
+
+CONCURRENCY=1200 WARMUP_REQS=300 ROUND_REQS=1500 ROUNDS=3 THRESHOLD_MS=1100 ./stable-1s.sh
+
+curl -sf http://127.0.0.1:15000/stats/prometheus > "${OUT}/envoy-prom-after.txt"
+curl -sf http://127.0.0.1:15000/clusters         > "${OUT}/envoy-clusters-after.txt"
+curl -sf http://127.0.0.1:19090/metrics          > "${OUT}/epp-after.txt"
+kubectl logs deploy/vllm-qwen3-32b-epp --since=10m > "${OUT}/epp-logs.txt"
+```
+
+Useful checks:
+
+- `istio_requests_total` should increase for the backend service by the number
+  of successful benchmark requests.
+- `istio_request_duration_milliseconds` on the Gateway source reporter shows
+  Gateway-to-backend request lifecycle latency. In the maintainer c=1200
+  diagnostic run, this was seconds while scheduler/plugin metrics were still
+  microseconds.
+- `istio_request_bytes` should show the large prompt size (roughly 220-230 KB).
+  If this is not true, the load generator or route is not exercising the large
+  body path.
+- `outbound|9002||vllm-qwen3-32b-epp...::rq_total` in `/clusters` confirms how
+  many ext_proc requests Gateway sent to EPP.
+- `outbound|54321||vllm-qwen3-32b-ip...::rq_total` and `::rq_success` confirm
+  the Gateway-to-backend request count.
+- `inference_extension_scheduler_e2e_duration_seconds` and
+  `inference_extension_plugin_duration_seconds` only cover scheduler/plugin
+  hooks. If they are tiny while `istio_request_duration_milliseconds` is large,
+  the bottleneck is outside scheduler scoring.
+- `inference_objective_request_duration_seconds` is broader than scheduler
+  metrics and should be compared with Gateway duration, but it still does not
+  identify body streaming versus EPP compute by itself.
+
+When `EPP_TIMING_DEBUG=1` instrumentation is enabled, compare these timing-log
+fields with Envoy stats:
+
+- `avgBodyStreamMs`: time from the first ext_proc request-body chunk to
+  request-body EOS at EPP. High values point to Envoy-to-EPP body streaming or
+  gRPC stream queuing.
+- `avgHeaderToFirstBodyMs`: time from request headers to the first body chunk.
+- `avgParseMs`, `avgDirectorMs`, `avgResponseBuildMs`: EPP compute after the
+  body has arrived.
+- `avgBodyChunks` and `avgBodyBytes`: confirm chunking and request size.
+
+Interpretation guide:
+
+- High `avgBodyStreamMs` plus high Gateway `istio_request_duration_milliseconds`
+  and tiny scheduler/plugin metrics points to ext_proc body streaming or Envoy
+  queueing, not scheduler scoring.
+- High `avgParseMs`, `avgDirectorMs`, or `avgResponseBuildMs` points to EPP code
+  paths such as OpenAI JSON decode, request repackage, or request-body response
+  generation.
+- High backend service duration with low EPP timing suggests the simulator or
+  Gateway-to-backend path is the bottleneck.
+- If host-side results are much slower than in-cluster results, investigate
+  local port-forwarding and host-to-KIND traffic before changing EPP code.
+
 ## Hot paths (for ~220 KB bodies)
 
 | Area | Location |
