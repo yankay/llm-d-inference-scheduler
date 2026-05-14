@@ -70,7 +70,13 @@ cd bench/pure-router
 On fast hosts:
 
 ```bash
-CONCURRENCY=1200 WARMUP_REQS=300 ROUND_REQS=1500 ROUNDS=3 THRESHOLD_MS=1100 ./stable-1s.sh
+env \
+  CONCURRENCY=1200 \
+  WARMUP_REQS=300 \
+  ROUND_REQS=1500 \
+  ROUNDS=3 \
+  THRESHOLD_MS=1100 \
+  ./stable-1s.sh
 ```
 
 Exit codes: `0` median ≥ threshold (repro confirmed), `1` below threshold (expected after a successful fix), `2` connectivity, `3` parse error.
@@ -113,7 +119,7 @@ A longer steady c=150 run (`results/c150-steady-30s.txt`) produced mean TTFT `11
 
 ### Stable TTFT gate
 
-`CONCURRENCY=1200 WARMUP_REQS=300 ROUND_REQS=1500 ROUNDS=3 THRESHOLD_MS=1100 ./stable-1s.sh`:
+Stable gate command (`CONCURRENCY=1200`, `THRESHOLD_MS=1100`):
 
 ```text
 per_round_ttft_mean_ms: 4701.59 4327.51 4555.61

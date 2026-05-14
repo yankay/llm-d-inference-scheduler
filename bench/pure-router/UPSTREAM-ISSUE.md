@@ -26,7 +26,7 @@ A steady c=150 run produced mean TTFT `1151.02 ms`, P50 `1167.11 ms`, P99 `1277.
 The stable gate also reproduced the issue:
 
 ```text
-CONCURRENCY=1200 WARMUP_REQS=300 ROUND_REQS=1500 ROUNDS=3 THRESHOLD_MS=1100 ./stable-1s.sh
+env CONCURRENCY=1200 WARMUP_REQS=300 ROUND_REQS=1500 ROUNDS=3 THRESHOLD_MS=1100 ./stable-1s.sh
 per_round_ttft_mean_ms: 4701.59 4327.51 4555.61
 median_ttft_mean_ms: 4555.61
 PASS: median TTFT mean 4555.61 ms >= threshold 1100 ms
@@ -50,7 +50,13 @@ EPP overhead for large bodies should stay modest and predictable; a ~220 KB prom
 git clone https://github.com/yankay/llm-d-router.git && cd llm-d-router && git checkout bench
 bench/pure-router/repro.sh
 cd bench/pure-router
-CONCURRENCY=1200 WARMUP_REQS=300 ROUND_REQS=1500 ROUNDS=3 THRESHOLD_MS=1100 ./stable-1s.sh
+env \
+  CONCURRENCY=1200 \
+  WARMUP_REQS=300 \
+  ROUND_REQS=1500 \
+  ROUNDS=3 \
+  THRESHOLD_MS=1100 \
+  ./stable-1s.sh
 ```
 
 Optional on bandwidth-constrained hosts:
