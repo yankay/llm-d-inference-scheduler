@@ -21,6 +21,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -29,17 +32,31 @@ import (
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 )
 
+var (
+	prefixHashTimingDebugEnabled = os.Getenv("EPP_TIMING_DEBUG") != ""
+
+	prefixHashTimingCount         atomic.Uint64
+	prefixHashTimingTotalNS       atomic.Int64
+	prefixHashTimingGetInputNS    atomic.Int64
+	prefixHashTimingHashLoopNS    atomic.Int64
+	prefixHashTimingInputBytes    atomic.Uint64
+	prefixHashTimingGeneratedHash atomic.Uint64
+)
+
 // hashPrompt divides the prompt into blocks and calculates a prefix cache hash for each block.
 // The first block hash includes the model name and cache salt (if provided).
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
 func hashPrompt(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) []blockHash {
+	totalStart := time.Now()
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	if request == nil || request.Body == nil {
 		loggerDebug.Info("Request or request data is nil, skipping hashing")
 		return nil
 	}
 
+	getInputStart := time.Now()
 	userInput, err := getUserInputBytes(request)
+	getInputDuration := time.Since(getInputStart)
 	if err != nil {
 		loggerDebug.Error(err, "Failed to get user input bytes")
 		return nil
@@ -68,6 +85,7 @@ func hashPrompt(ctx context.Context, request *scheduling.InferenceRequest, block
 	// Split the body into blocks of size cacheBlockSizeChars.
 	res := make([]blockHash, 0, len(userInput)/cacheBlockSizeChars)
 
+	hashLoopStart := time.Now()
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
 	_, _ = h.Write([]byte(request.TargetModel))
@@ -94,6 +112,9 @@ func hashPrompt(ctx context.Context, request *scheduling.InferenceRequest, block
 		_, _ = h.Write(toBytes(prevBlockHash))
 		res = append(res, blockHash(h.Sum64()))
 	}
+	if prefixHashTimingDebugEnabled {
+		recordPrefixHashTiming(ctx, time.Since(totalStart), getInputDuration, time.Since(hashLoopStart), len(userInput), len(res))
+	}
 
 	return res
 }
@@ -102,6 +123,27 @@ func toBytes(i blockHash) []byte {
 	bytes := make([]byte, 8)
 	binary.LittleEndian.PutUint64(bytes, uint64(i))
 	return bytes
+}
+
+func recordPrefixHashTiming(ctx context.Context, total, getInput, hashLoop time.Duration, inputBytes int, generatedHashes int) {
+	n := prefixHashTimingCount.Add(1)
+	prefixHashTimingTotalNS.Add(total.Nanoseconds())
+	prefixHashTimingGetInputNS.Add(getInput.Nanoseconds())
+	prefixHashTimingHashLoopNS.Add(hashLoop.Nanoseconds())
+	prefixHashTimingInputBytes.Add(uint64(inputBytes))
+	prefixHashTimingGeneratedHash.Add(uint64(generatedHashes))
+	if n%100 != 0 {
+		return
+	}
+	count := float64(n)
+	log.FromContext(ctx).Info("Approx prefix hash timing aggregate",
+		"requests", n,
+		"avgTotalMs", float64(prefixHashTimingTotalNS.Load())/count/float64(time.Millisecond),
+		"avgGetInputMs", float64(prefixHashTimingGetInputNS.Load())/count/float64(time.Millisecond),
+		"avgHashLoopMs", float64(prefixHashTimingHashLoopNS.Load())/count/float64(time.Millisecond),
+		"avgInputBytes", float64(prefixHashTimingInputBytes.Load())/count,
+		"avgGeneratedHashes", float64(prefixHashTimingGeneratedHash.Load())/count,
+	)
 }
 
 func getUserInputBytes(request *scheduling.InferenceRequest) ([]byte, error) {

@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -210,4 +211,89 @@ func (m *mockDirectorRequest) GetRandomEndpoint() *datalayer.EndpointMetadata {
 		Address: "1.2.3.4",
 		Port:    "80",
 	}
+}
+
+func TestRequestBodyCapacity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "valid", value: "1024", want: 1024},
+		{name: "at cap", value: strconv.Itoa(maxRequestBodyPreallocBytes), want: maxRequestBodyPreallocBytes},
+		{name: "above cap clamped", value: strconv.Itoa(maxRequestBodyPreallocBytes + 1), want: maxRequestBodyPreallocBytes},
+		{name: "missing", value: "", want: 0},
+		{name: "malformed", value: "not-a-number", want: 0},
+		{name: "non-positive", value: "0", want: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var headers []*configPb.HeaderValue
+			if tc.value != "" {
+				headers = []*configPb.HeaderValue{{Key: "content-length", Value: tc.value}}
+			}
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers: &configPb.HeaderMap{Headers: headers},
+				},
+			}
+			assert.Equal(t, tc.want, requestBodyCapacity(req))
+		})
+	}
+}
+
+func TestAppendRequestBodyChunk(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single chunk reuses request body bytes", func(t *testing.T) {
+		chunk := []byte("request body")
+
+		got, borrowed := appendRequestBodyChunk(nil, false, chunk, 1024)
+
+		assert.Equal(t, chunk, got)
+		assert.True(t, borrowed)
+		assert.Same(t, &chunk[0], &got[0])
+	})
+
+	t.Run("data chunk followed by empty eos reuses request body bytes", func(t *testing.T) {
+		chunk := []byte("request body")
+
+		body, borrowed := appendRequestBodyChunk(nil, false, chunk, 1024)
+		body, borrowed = appendRequestBodyChunk(body, borrowed, nil, 1024)
+
+		assert.Equal(t, chunk, body)
+		assert.True(t, borrowed)
+		assert.Same(t, &chunk[0], &body[0])
+	})
+
+	t.Run("multi chunk preallocates when merging second non-empty chunk", func(t *testing.T) {
+		first := []byte("hello ")
+		second := []byte("world")
+
+		body, borrowed := appendRequestBodyChunk(nil, false, first, 32)
+		assert.Equal(t, "hello ", string(body))
+		assert.True(t, borrowed)
+		assert.Same(t, &first[0], &body[0])
+
+		body, borrowed = appendRequestBodyChunk(body, borrowed, second, 32)
+		assert.Equal(t, "hello world", string(body))
+		assert.False(t, borrowed)
+		assert.GreaterOrEqual(t, cap(body), 32)
+		assert.NotSame(t, &first[0], &body[0])
+	})
+
+	t.Run("missing prealloc allocates enough when merging", func(t *testing.T) {
+		first := []byte("hello")
+		second := []byte(" world")
+
+		body, borrowed := appendRequestBodyChunk(nil, false, first, 0)
+		body, borrowed = appendRequestBodyChunk(body, borrowed, second, 0)
+
+		assert.Equal(t, "hello world", string(body))
+		assert.False(t, borrowed)
+		assert.NotSame(t, &first[0], &body[0])
+	})
 }

@@ -21,8 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
@@ -57,6 +61,16 @@ const (
 
 // compile-time type validation
 var _ fwkrh.Parser = &OpenAIParser{}
+
+var (
+	openAIParserTimingDebugEnabled = os.Getenv("EPP_TIMING_DEBUG") != ""
+
+	openAIParserTimingCount     atomic.Uint64
+	openAIParserTimingTotalNS   atomic.Int64
+	openAIParserTimingMapNS     atomic.Int64
+	openAIParserTimingTypedNS   atomic.Int64
+	openAIParserTimingBodyBytes atomic.Uint64
+)
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
 // https://developers.openai.com/api/reference/overview
@@ -94,11 +108,16 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	parseStart := time.Now()
+	mapStart := parseStart
 	bodyMap := make(map[string]any)
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
 	}
+	mapDuration := time.Since(mapStart)
+	typedStart := time.Now()
 	extractedBody, err := extractRequestBody(body, headers)
+	typedDuration := time.Since(typedStart)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +125,29 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
+	if openAIParserTimingDebugEnabled {
+		recordOpenAIParserTiming(ctx, time.Since(parseStart), mapDuration, typedDuration, len(body))
+	}
 	return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+}
+
+func recordOpenAIParserTiming(ctx context.Context, total, mapDecode, typedDecode time.Duration, bodyBytes int) {
+	n := openAIParserTimingCount.Add(1)
+	openAIParserTimingTotalNS.Add(total.Nanoseconds())
+	openAIParserTimingMapNS.Add(mapDecode.Nanoseconds())
+	openAIParserTimingTypedNS.Add(typedDecode.Nanoseconds())
+	openAIParserTimingBodyBytes.Add(uint64(bodyBytes))
+	if n%100 != 0 {
+		return
+	}
+	count := float64(n)
+	log.FromContext(ctx).Info("OpenAI parser timing aggregate",
+		"requests", n,
+		"avgTotalMs", float64(openAIParserTimingTotalNS.Load())/count/float64(time.Millisecond),
+		"avgMapDecodeMs", float64(openAIParserTimingMapNS.Load())/count/float64(time.Millisecond),
+		"avgTypedDecodeMs", float64(openAIParserTimingTypedNS.Load())/count/float64(time.Millisecond),
+		"avgBodyBytes", float64(openAIParserTimingBodyBytes.Load())/count,
+	)
 }
 
 // ParseResponse extracts usage metadata from the provider's response.

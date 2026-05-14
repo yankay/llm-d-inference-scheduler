@@ -24,10 +24,13 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -53,6 +56,22 @@ const (
 	// Make this timeout configurable per-plugin or globally via the Director configuration to support plugins with
 	// varying latency profiles.
 	dataProducerTimeout = 400 * time.Millisecond
+)
+
+var (
+	directorTimingDebugEnabled = os.Getenv("EPP_TIMING_DEBUG") != ""
+
+	directorTimingCount              atomic.Uint64
+	directorTimingTotalNS            atomic.Int64
+	directorTimingModelRewriteNS     atomic.Int64
+	directorTimingAssembleNS         atomic.Int64
+	directorTimingAdmissionNS        atomic.Int64
+	directorTimingLocateNS           atomic.Int64
+	directorTimingDataProducerNS     atomic.Int64
+	directorTimingAdmissionPluginsNS atomic.Int64
+	directorTimingScheduleNS         atomic.Int64
+	directorTimingPrepareNS          atomic.Int64
+	directorTimingRepackageNS        atomic.Int64
 )
 
 // Datastore defines the interface required by the Director.
@@ -154,12 +173,25 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	defer span.End()
 
 	logger := log.FromContext(ctx)
+	directorStart := time.Now()
+	stageStart := directorStart
+	var modelRewriteDuration time.Duration
+	var assembleDuration time.Duration
+	var admissionDuration time.Duration
+	var locateDuration time.Duration
+	var dataProducerDuration time.Duration
+	var admissionPluginsDuration time.Duration
+	var scheduleDuration time.Duration
+	var prepareDuration time.Duration
+	var repackageDuration time.Duration
 
 	err := d.modelRewriteIfNeeded(reqCtx, inferenceRequestBody)
+	modelRewriteDuration = time.Since(stageStart)
 	if err != nil {
 		return reqCtx, err
 	}
 
+	stageStart = time.Now()
 	infObjective := d.getInferenceObjective(ctx, reqCtx)
 	priority := int(*infObjective.Spec.Priority)
 	reqCtx.Priority = priority
@@ -183,11 +215,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
+	assembleDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
 	}
+	admissionDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
 	if len(endpointCandidates) == 0 {
 		return reqCtx, errcommon.Error{
@@ -197,19 +233,26 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
+	locateDuration = time.Since(stageStart)
 	// Prepare per request data by running DataProducer plugins.
+	stageStart = time.Now()
 	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	dataProducerDuration = time.Since(stageStart)
 	if err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
 	}
 
 	// Run admit request plugins
+	stageStart = time.Now()
 	if !d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods) {
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "request cannot be admitted"}
 	}
+	admissionPluginsDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	scheduleDuration = time.Since(stageStart)
 	if err != nil {
 		return reqCtx, errcommon.Error{Code: errcommon.ResourceExhausted, Msg: fmt.Errorf("failed to find target endpoint: %w", err).Error()}
 	}
@@ -219,12 +262,19 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// Prepare Request (Populates RequestContext and call PreRequest plugins)
 	// Insert target endpoint to instruct Envoy to route requests to the specified target pod and attach the port number.
 	// Invoke PreRequest registered plugins.
+	stageStart = time.Now()
 	reqCtx, err = d.prepareRequest(ctx, reqCtx, result)
+	prepareDuration = time.Since(stageStart)
 	if err != nil {
 		return reqCtx, err
 	}
+	stageStart = time.Now()
 	if err := d.repackage(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
+	}
+	repackageDuration = time.Since(stageStart)
+	if directorTimingDebugEnabled {
+		recordDirectorTiming(logger, time.Since(directorStart), modelRewriteDuration, assembleDuration, admissionDuration, locateDuration, dataProducerDuration, admissionPluginsDuration, scheduleDuration, prepareDuration, repackageDuration)
 	}
 	return reqCtx, nil
 }
@@ -272,6 +322,37 @@ func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContex
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "Unsupported llmRequest parsedBody"}
 	}
 	return nil
+}
+
+func recordDirectorTiming(logger logr.Logger, total, modelRewrite, assemble, admission, locate, dataProducer, admissionPlugins, schedule, prepare, repackage time.Duration) {
+	n := directorTimingCount.Add(1)
+	directorTimingTotalNS.Add(total.Nanoseconds())
+	directorTimingModelRewriteNS.Add(modelRewrite.Nanoseconds())
+	directorTimingAssembleNS.Add(assemble.Nanoseconds())
+	directorTimingAdmissionNS.Add(admission.Nanoseconds())
+	directorTimingLocateNS.Add(locate.Nanoseconds())
+	directorTimingDataProducerNS.Add(dataProducer.Nanoseconds())
+	directorTimingAdmissionPluginsNS.Add(admissionPlugins.Nanoseconds())
+	directorTimingScheduleNS.Add(schedule.Nanoseconds())
+	directorTimingPrepareNS.Add(prepare.Nanoseconds())
+	directorTimingRepackageNS.Add(repackage.Nanoseconds())
+	if n%100 != 0 {
+		return
+	}
+	count := float64(n)
+	logger.Info("Director timing aggregate",
+		"requests", n,
+		"avgTotalMs", float64(directorTimingTotalNS.Load())/count/float64(time.Millisecond),
+		"avgModelRewriteMs", float64(directorTimingModelRewriteNS.Load())/count/float64(time.Millisecond),
+		"avgAssembleMs", float64(directorTimingAssembleNS.Load())/count/float64(time.Millisecond),
+		"avgAdmissionMs", float64(directorTimingAdmissionNS.Load())/count/float64(time.Millisecond),
+		"avgLocateMs", float64(directorTimingLocateNS.Load())/count/float64(time.Millisecond),
+		"avgDataProducerMs", float64(directorTimingDataProducerNS.Load())/count/float64(time.Millisecond),
+		"avgAdmissionPluginsMs", float64(directorTimingAdmissionPluginsNS.Load())/count/float64(time.Millisecond),
+		"avgScheduleMs", float64(directorTimingScheduleNS.Load())/count/float64(time.Millisecond),
+		"avgPrepareMs", float64(directorTimingPrepareNS.Load())/count/float64(time.Millisecond),
+		"avgRepackageMs", float64(directorTimingRepackageNS.Load())/count/float64(time.Millisecond),
+	)
 }
 
 func (d *Director) applyWeightedModelRewrite(reqCtx *handlers.RequestContext) {

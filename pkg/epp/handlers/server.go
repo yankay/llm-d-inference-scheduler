@@ -20,7 +20,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -165,6 +168,25 @@ type recvResult struct {
 	err error
 }
 
+// maxRequestBodyPreallocBytes bounds Content-Length-driven body buffer
+// preallocation; sized for long-context (multi-MiB) JSON bodies.
+const maxRequestBodyPreallocBytes = 16 << 20 // 16 MiB
+
+var (
+	eppTimingDebugEnabled = os.Getenv("EPP_TIMING_DEBUG") != ""
+
+	eppTimingProcessCount    atomic.Uint64
+	eppTimingTotalNS         atomic.Int64
+	eppTimingBodyNS          atomic.Int64
+	eppTimingHeaderToBodyNS  atomic.Int64
+	eppTimingBodyStreamNS    atomic.Int64
+	eppTimingParseNS         atomic.Int64
+	eppTimingDirectorNS      atomic.Int64
+	eppTimingResponseBuildNS atomic.Int64
+	eppTimingBodyChunks      atomic.Uint64
+	eppTimingBodyBytes       atomic.Uint64
+)
+
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	ctx := srv.Context()
 
@@ -197,6 +219,18 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 	}
 
 	var body []byte
+	var bodyBorrowed bool
+	var requestBodyPreallocCapacity int
+	var requestTimingStart time.Time
+	var requestFirstBodyTime time.Time
+	var requestBodyAppendDuration time.Duration
+	var requestHeaderToFirstBodyDuration time.Duration
+	var requestBodyStreamDuration time.Duration
+	var requestParseDuration time.Duration
+	var requestDirectorDuration time.Duration
+	var requestResponseBuildDuration time.Duration
+	var requestBodyChunks int
+	var requestBodyBytes int
 	var evictionRequestID string
 
 	// Start a single reader goroutine for the lifetime of the stream.
@@ -309,23 +343,56 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID will be logged too as part of logger context values.
 			loggerTrace = logger.V(logutil.TRACE)
 			ctx = log.IntoContext(ctx, logger)
+			if eppTimingDebugEnabled {
+				requestTimingStart = time.Now()
+				requestFirstBodyTime = time.Time{}
+				requestBodyAppendDuration = 0
+				requestHeaderToFirstBodyDuration = 0
+				requestBodyStreamDuration = 0
+				requestParseDuration = 0
+				requestDirectorDuration = 0
+				requestResponseBuildDuration = 0
+				requestBodyChunks = 0
+				requestBodyBytes = 0
+			}
 
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
+			if err == nil && !v.RequestHeaders.EndOfStream {
+				requestBodyPreallocCapacity = requestBodyCapacity(v)
+			}
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
 			// In the stream case, we can receive multiple request bodies.
-			body = append(body, v.RequestBody.Body...)
+			bodyAppendStart := time.Now()
+			if eppTimingDebugEnabled && requestBodyChunks == 0 {
+				requestFirstBodyTime = bodyAppendStart
+				requestHeaderToFirstBodyDuration = requestFirstBodyTime.Sub(requestTimingStart)
+			}
+			body, bodyBorrowed = appendRequestBodyChunk(body, bodyBorrowed, v.RequestBody.Body, requestBodyPreallocCapacity)
+			if eppTimingDebugEnabled {
+				requestBodyAppendDuration += time.Since(bodyAppendStart)
+				requestBodyChunks++
+				requestBodyBytes += len(v.RequestBody.Body)
+			}
 
 			// Message is buffered, we can read and decode.
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
+				if eppTimingDebugEnabled && !requestFirstBodyTime.IsZero() {
+					requestBodyStreamDuration = time.Since(requestFirstBodyTime)
+				}
 				reqCtx.Request.RawBody = body
 
 				// Body stream complete. Capture raw size for flow control.
 				reqCtx.RequestSize = len(body)
-				body = []byte{}
+				body = nil
+				bodyBorrowed = false
 
+				parseStart := time.Now()
 				parseResult, parseErr := s.parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+				if eppTimingDebugEnabled {
+					requestParseDuration = time.Since(parseStart)
+				}
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 					logger.Error(err, "Error parsing request")
@@ -341,7 +408,11 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
+				directorStart := time.Now()
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
+				if eppTimingDebugEnabled {
+					requestDirectorDuration = time.Since(directorStart)
+				}
 				if err != nil {
 					logger.Error(err, "Error handling request")
 					break
@@ -359,10 +430,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					reqCtx.modelServerStreaming = reqCtx.SchedulingRequest.Body.Stream
 				}
 
+				responseBuildStart := time.Now()
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestSize)
+				if eppTimingDebugEnabled {
+					requestResponseBuildDuration = time.Since(responseBuildStart)
+					recordEPPProcessTiming(logger, time.Since(requestTimingStart), requestBodyAppendDuration, requestHeaderToFirstBodyDuration, requestBodyStreamDuration, requestParseDuration, requestDirectorDuration, requestResponseBuildDuration, requestBodyChunks, requestBodyBytes)
+				}
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
@@ -442,6 +518,73 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return nil
 		}
 	}
+}
+
+// requestBodyCapacity returns the body buffer preallocation size from
+// Content-Length, clamped to maxRequestBodyPreallocBytes. Returns 0 for
+// missing, malformed, or non-positive values.
+func requestBodyCapacity(req *extProcPb.ProcessingRequest_RequestHeaders) int {
+	contentLength := envoy.ExtractHeaderValue(req, "content-length")
+	if contentLength == "" {
+		return 0
+	}
+	bodyLength, err := strconv.Atoi(contentLength)
+	if err != nil || bodyLength <= 0 {
+		return 0
+	}
+	if bodyLength > maxRequestBodyPreallocBytes {
+		return maxRequestBodyPreallocBytes
+	}
+	return bodyLength
+}
+
+func appendRequestBodyChunk(body []byte, borrowed bool, chunk []byte, preallocCapacity int) ([]byte, bool) {
+	if len(chunk) == 0 {
+		return body, borrowed
+	}
+	if len(body) == 0 {
+		return chunk, true
+	}
+	if borrowed {
+		capacity := preallocCapacity
+		if capacity < len(body)+len(chunk) {
+			capacity = len(body) + len(chunk)
+		}
+		merged := make([]byte, 0, capacity)
+		merged = append(merged, body...)
+		merged = append(merged, chunk...)
+		return merged, false
+	}
+	return append(body, chunk...), false
+}
+
+func recordEPPProcessTiming(logger logr.Logger, total, bodyAppend, headerToBody, bodyStream, parse, director, responseBuild time.Duration, chunks int, bodyBytes int) {
+	n := eppTimingProcessCount.Add(1)
+	eppTimingTotalNS.Add(total.Nanoseconds())
+	eppTimingBodyNS.Add(bodyAppend.Nanoseconds())
+	eppTimingHeaderToBodyNS.Add(headerToBody.Nanoseconds())
+	eppTimingBodyStreamNS.Add(bodyStream.Nanoseconds())
+	eppTimingParseNS.Add(parse.Nanoseconds())
+	eppTimingDirectorNS.Add(director.Nanoseconds())
+	eppTimingResponseBuildNS.Add(responseBuild.Nanoseconds())
+	eppTimingBodyChunks.Add(uint64(chunks))
+	eppTimingBodyBytes.Add(uint64(bodyBytes))
+	if n%100 != 0 {
+		return
+	}
+	count := float64(n)
+	logger.Info("EPP timing aggregate",
+		"requests", n,
+		"avgTotalMs", float64(eppTimingTotalNS.Load())/count/float64(time.Millisecond),
+		"avgBodyAppendMs", float64(eppTimingBodyNS.Load())/count/float64(time.Millisecond),
+		"avgHeaderToFirstBodyMs", float64(eppTimingHeaderToBodyNS.Load())/count/float64(time.Millisecond),
+		"avgBodyStreamMs", float64(eppTimingBodyStreamNS.Load())/count/float64(time.Millisecond),
+		"avgParseMs", float64(eppTimingParseNS.Load())/count/float64(time.Millisecond),
+		"avgDirectorMs", float64(eppTimingDirectorNS.Load())/count/float64(time.Millisecond),
+		"avgResponseBuildMs", float64(eppTimingResponseBuildNS.Load())/count/float64(time.Millisecond),
+		"avgBodyChunks", float64(eppTimingBodyChunks.Load())/count,
+		"avgBodyBytes", float64(eppTimingBodyBytes.Load())/count,
+	)
 }
 
 // finishResponse ensures all post-response logic, such as metric recording
