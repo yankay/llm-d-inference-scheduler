@@ -81,6 +81,47 @@ env \
 
 Exit codes: `0` median ≥ threshold (repro confirmed), `1` below threshold (expected after a successful fix), `2` connectivity, `3` parse error.
 
+## Before Drawing Conclusions
+
+Do not attribute high TTFT to EPP code paths from this benchmark alone. A
+large-input run includes client upload, local port-forwarding, Gateway/Envoy
+body streaming, EPP processing, and backend response time. Before concluding
+that a specific EPP hot path is responsible, first rule out the surrounding
+transport and backend.
+
+Network / transport checks:
+
+- Prefer an in-cluster `http-bench` run that talks to the Gateway service
+  directly. This removes local `kubectl port-forward` from the 220 KB request
+  upload path.
+- Compare with the host-side `stable-1s.sh` result. If in-cluster TTFT is much
+  lower, the bottleneck is likely in local networking, port-forwarding, or host
+  to KIND traffic rather than EPP business logic.
+- Record body chunk behavior from EPP timing logs when `EPP_TIMING_DEBUG=1`.
+  In the maintainer run, 220 KB requests arrived as roughly 7 body chunks and
+  most EPP-side wait was in body streaming, not slice append or JSON parsing.
+- Use the same `INPUT_CHARS`, `CONCURRENCY`, `WARMUP_REQS`, and `ROUND_REQS`
+  when comparing host-side and in-cluster runs.
+
+Backend checks:
+
+- This repro uses `llm-d-inference-sim` specifically to avoid real model
+  prefill/decode latency. Keep that backend unless you are intentionally testing
+  a real model server.
+- Directly benchmark the simulator service, bypassing Gateway/EPP, with the
+  same 220 KB prompt. TTFT should stay near-instant compared with the EPP route.
+- Check backend pod CPU, restarts, and simulator logs during the run. Do not
+  draw EPP conclusions if the simulator is throttled, restarting, or returning
+  slow responses.
+- Confirm EPP metrics still show scheduler/plugin durations far below request
+  duration. If backend duration dominates, optimize or replace the backend
+  setup before investigating EPP internals.
+
+Only after the transport path and backend are ruled out should the remaining
+TTFT be assigned to EPP request-path behavior. See [`TIMING-DEBUG.md`](TIMING-DEBUG.md)
+for the temporary EPP-side timing instrumentation and the initial observation
+that body streaming wait dominates this particular 220 KB prompt benchmark.
+
 ## Hot paths (for ~220 KB bodies)
 
 | Area | Location |
