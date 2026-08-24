@@ -115,16 +115,29 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	bodyMap := make(map[string]any)
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
-		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
-	}
 	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
+		var bodyMap map[string]any
+		if mapErr := json.Unmarshal(body, &bodyMap); mapErr != nil {
+			return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", mapErr)
+		}
 		return nil, err
 	}
-	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+
+	rawField := tokenInputField(extractedBody)
+	var bodyMap fwkrh.PayloadMap
+	if rawField == "" {
+		bodyMap = make(fwkrh.PayloadMap)
+		err = json.Unmarshal(body, &bodyMap)
+	} else {
+		bodyMap, err = decodePayloadWithRawField(body, rawField)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
+	}
+
+	extractedBody.Payload = bodyMap
 	if model, ok := bodyMap["model"].(string); ok {
 		extractedBody.Model = model
 	}
@@ -133,6 +146,39 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+func tokenInputField(body *fwkrh.InferenceRequestBody) string {
+	switch {
+	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
+		return "prompt"
+	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
+		return "input"
+	default:
+		return ""
+	}
+}
+
+func decodePayloadWithRawField(body []byte, rawField string) (fwkrh.PayloadMap, error) {
+	rawFields := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(body, &rawFields); err != nil {
+		return nil, err
+	}
+
+	payload := make(fwkrh.PayloadMap, len(rawFields))
+	for key, raw := range rawFields {
+		if key == rawField && !bytes.ContainsAny(raw, ".eE") {
+			payload[key] = raw
+			continue
+		}
+
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, err
+		}
+		payload[key] = value
+	}
+	return payload, nil
 }
 
 // RewriteModelName writes the resolved model into the request payload map.

@@ -20,6 +20,7 @@ limitations under the License.
 package vllmhttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -113,8 +114,8 @@ func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mode
 // parseGenerateRequest decodes a /inference/v1/generate body into an
 // InferenceRequestBody. Token IDs are required; everything else is optional.
 func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResult, error) {
-	bodyMap := make(map[string]any)
-	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+	bodyMap, err := decodeGeneratePayload(rawBody)
+	if err != nil {
 		return nil, err
 	}
 
@@ -128,7 +129,7 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 
 	body := &fwkrh.InferenceRequestBody{
 		Generate: &generate,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		Payload:  bodyMap,
 	}
 	if model, ok := bodyMap["model"].(string); ok {
 		body.Model = model
@@ -141,4 +142,26 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 		body.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: body, SkipResponseProcessing: false}, nil
+}
+
+func decodeGeneratePayload(rawBody []byte) (fwkrh.PayloadMap, error) {
+	rawFields := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(rawBody, &rawFields); err != nil {
+		return nil, err
+	}
+
+	payload := make(fwkrh.PayloadMap, len(rawFields))
+	for key, raw := range rawFields {
+		if key == "token_ids" && !bytes.ContainsAny(raw, ".eE") {
+			payload[key] = raw
+			continue
+		}
+
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, err
+		}
+		payload[key] = value
+	}
+	return payload, nil
 }

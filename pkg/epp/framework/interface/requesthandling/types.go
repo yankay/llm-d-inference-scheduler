@@ -17,6 +17,7 @@ limitations under the License.
 package requesthandling
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -285,7 +286,24 @@ func parseArrayInput(v []any, errorPrefix string) (arrayInputResult, error) {
 	}
 }
 
+func parseUint32Array(data []byte) ([]uint32, bool) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, false
+	}
+	var tokenIDs []uint32
+	if err := json.Unmarshal(trimmed, &tokenIDs); err != nil {
+		return nil, false
+	}
+	return tokenIDs, true
+}
+
 func (p *Prompt) UnmarshalJSON(data []byte) error {
+	if tokenIDs, ok := parseUint32Array(data); ok {
+		p.TokenIDs = tokenIDs
+		return nil
+	}
+
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -431,6 +449,11 @@ type EmbeddingsInput struct {
 }
 
 func (e *EmbeddingsInput) UnmarshalJSON(data []byte) error {
+	if tokenIDs, ok := parseUint32Array(data); ok {
+		e.TokenIDs = tokenIDs
+		return nil
+	}
+
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -548,30 +571,45 @@ func (r *GenerateRequest) String() string {
 	return fmt.Sprintf("{TokenIDsCount: %d, MMHashes: %s}", len(r.TokenIDs), mmHashes)
 }
 
+type generateWirePlaceholder struct {
+	Offset int `json:"offset"`
+	Length int `json:"length"`
+}
+
+type generateWireFeatures struct {
+	MMHashes       map[string][]string                  `json:"mm_hashes"`
+	MMPlaceholders map[string][]generateWirePlaceholder `json:"mm_placeholders"`
+}
+
+type generateRequestWire[T any] struct {
+	TokenIDs  T                     `json:"token_ids"`
+	CacheSalt string                `json:"cache_salt,omitempty"`
+	Features  *generateWireFeatures `json:"features,omitempty"`
+}
+
 func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
-	type wirePlaceholder struct {
-		Offset int `json:"offset"`
-		Length int `json:"length"`
-	}
-	var raw struct {
-		TokenIDs  []float64 `json:"token_ids"`
-		CacheSalt string    `json:"cache_salt,omitempty"`
-		Features  *struct {
-			MMHashes       map[string][]string          `json:"mm_hashes"`
-			MMPlaceholders map[string][]wirePlaceholder `json:"mm_placeholders"`
-		} `json:"features,omitempty"`
-	}
+	var raw generateRequestWire[[]uint32]
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		var compat generateRequestWire[[]float64]
+		if compatErr := json.Unmarshal(data, &compat); compatErr != nil {
+			return compatErr
+		}
+
+		tokenIDs := make([]uint32, len(compat.TokenIDs))
+		for i, value := range compat.TokenIDs {
+			if value < 0 || value > math.MaxUint32 || value != math.Trunc(value) {
+				return fmt.Errorf("token_ids[%d]: invalid value %v", i, value)
+			}
+			tokenIDs[i] = uint32(value)
+		}
+		raw = generateRequestWire[[]uint32]{
+			TokenIDs:  tokenIDs,
+			CacheSalt: compat.CacheSalt,
+			Features:  compat.Features,
+		}
 	}
 	r.CacheSalt = raw.CacheSalt
-	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
-	for i, v := range raw.TokenIDs {
-		if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
-			return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
-		}
-		r.TokenIDs[i] = uint32(v)
-	}
+	r.TokenIDs = raw.TokenIDs
 	if raw.Features != nil {
 		ranges := make(map[string][]kvblock.PlaceholderRange, len(raw.Features.MMPlaceholders))
 		for modality, ws := range raw.Features.MMPlaceholders {

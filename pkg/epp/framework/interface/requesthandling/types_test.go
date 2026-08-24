@@ -57,7 +57,11 @@ func TestPrompt_UnmarshalJSON(t *testing.T) {
 			input:   `[1.5,2.7]`,
 			wantErr: true,
 		},
-
+		{
+			name:  "whole decimal token IDs",
+			input: `[1.0]`,
+			want:  Prompt{TokenIDs: []uint32{1}},
+		},
 		{
 			name:    "array of arrays of integers prompt is rejected for now",
 			input:   `[[1,2],[3,4]]`,
@@ -117,7 +121,11 @@ func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
 			input:   `[1.5,2.7]`,
 			wantErr: true,
 		},
-
+		{
+			name:  "exponent token IDs",
+			input: `[1e0]`,
+			want:  EmbeddingsInput{TokenIDs: []uint32{1}},
+		},
 		{
 			name:    "array of arrays of integers input is rejected for now",
 			input:   `[[1,2],[3,4]]`,
@@ -199,6 +207,16 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			name:  "max uint32 boundary accepted",
 			input: `{"token_ids":[4294967295]}`,
 			want:  []uint32{4294967295},
+		},
+		{
+			name:  "whole decimal accepted",
+			input: `{"token_ids":[1.0]}`,
+			want:  []uint32{1},
+		},
+		{
+			name:  "whole exponent accepted",
+			input: `{"token_ids":[1e0]}`,
+			want:  []uint32{1},
 		},
 		{
 			name:        "negative token id rejected",
